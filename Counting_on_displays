@@ -1,0 +1,782 @@
+
+
+
+;*******************************************************************************
+;* Processzor: PIC16F887
+;* Belső órajel: 4 MHz
+;* Fordító: MPASMWIN(v5.66)
+;*******************************************************************************
+;   System: Windows XP version 5.1 running on x86; Cp1250; en_US (mplab)
+;   User directory: C:\Documents and Settings\Administrator.WINXP-F8D91A\Application Data\mplab_ide\dev\v3.26
+;   Cache directory: C:\Documents and Settings\Administrator.WINXP-F8D91A\Local Settings\Application Data\mplab_ide\Cache\dev\v3.26\var
+;    
+;*******************************************************************************   
+;    TIMER0 is in free running mode, so it counts the program steps.
+;    Overflow on TIMER0 sets the corresponding FLAG
+;    Full loop should be shorter than half of TIMER0 overflowing time (approx. 256us / 2)    
+;
+;    There is no interruption in the code
+;    
+;    Additional care for ReadModifyWrite sequence on PORTB
+;    - some macros help to avoid problems
+;    
+    
+    LIST P=16F887
+    #include <p16f887.inc>
+
+; CONFIG1
+    __CONFIG _CONFIG1, _INTRC_OSC_NOCLKOUT & _WDT_OFF & _PWRTE_OFF & _MCLRE_ON & _CP_OFF & _CPD_OFF & _BOR_OFF & _IESO_OFF & _FCMEN_ON & _LVP_OFF
+; CONFIG2
+    __CONFIG _CONFIG2, _BOR4V_BOR40V & _WRT_OFF
+
+;********** V Ã L T O Z Ã K **************************************************
+    CBLOCK 0x20
+        Delay50usVal         
+	Delay2sVal
+        Ones          ; Egyesek
+        Tens          ; TÃ­zesek
+        Hundreds         ; SzÃ¡zasok
+        Thousands          ; Ezresek
+        RepeatCount        ; MultiplexÃ¡lÃ¡s ismÃ©tlÃ©si szÃ¡mlÃ¡lÃ³
+        LCD_Temp        ; Ideiglenes regiszter az LCD adatkÃ¼ldÃ©shez
+        TempBin         ; Ideiglenes regiszter a binÃ¡ris szÃ¡mÃ­tÃ¡shoz
+	SM_LED
+	STTATUSvalue
+	CurrentState
+	PORTBx		; Shadow value for PORTB 
+	OverflowCnt     ; számláló (8-tól 0-ig)
+	TMR0IF_Cnt
+	CurrentTMR0
+	LastTMR0
+	DigitState
+	TempIndex
+	TargetLow
+	
+    ENDC
+
+#define	STATEMACHINE	   SM_LED,7    
+#define	LCD_ON		   SM_LED,6
+#define	COUNTING	   SM_LED,5    
+    
+RS_SET macro 
+
+    bsf	    PORTBx,4
+    MOVF    PORTBx,w
+    movwf   PORTB
+     
+    endm     
+    
+RS_CLR macro 
+
+    bcf	    PORTBx,4
+    MOVF    PORTBx,w
+    movwf   PORTB
+     
+    endm     
+    
+E_SET macro 
+
+    bsf	    PORTBx,5
+    MOVF    PORTBx,w
+    movwf   PORTB
+     
+    endm     
+    
+E_CLR macro 
+
+    bcf	    PORTBx,5
+    MOVF    PORTBx,w
+    movwf   PORTB
+     
+    endm     
+    
+PORTBupdate macro 
+ 
+    MOVF    PORTBx,w
+    movwf   PORTB
+     
+    endm    
+    
+PORTBwrite macro value
+ 
+    MOVLW value
+    MOVWF PORTBx
+    movwf PORTB
+     
+    endm    
+    
+SET_STATUS macro value
+ 
+    bsf	    STTATUSvalue,value
+    movf    STTATUSvalue,w    
+    banksel PORTE
+    movwf   PORTE
+    banksel STTATUSvalue
+ 
+    endm
+
+CLR_STATUS macro value
+ 
+    bcf	    STTATUSvalue,value
+    movf    STTATUSvalue,w    
+    banksel PORTE
+    movwf   PORTE
+    banksel STTATUSvalue
+ 
+    endm
+    
+GET_STATUS macro value
+ 
+    movlw   b'00000000'
+    btfsc   STTATUSvalue,value
+    movlw   b'00000001'
+    
+    endm
+    
+FLIP_STATUS macro value
+ 
+    movlw   b'00000000'
+    btfsc   STTATUSvalue,value	; Ha bit=0, akkor w=0
+    movlw   b'00000001'
+    
+    addlw   b'11111111'
+    btfsc   STATUS,Z		; Ha Z, akkor w=1 volt Ã©s
+    bcf	    STTATUSvalue,value	; kimarad
+    
+    btfss   STATUS,Z		; Ha NZ, akkor w=0 volt és
+    bsf	    STTATUSvalue,value    ; kimarad
+    
+    movf    STTATUSvalue,w
+    banksel PORTE
+    movwf   PORTE
+    banksel STTATUSvalue
+    
+    endm    
+    
+;********** R E S E T **********************************************************
+    ORG 0x0000
+RESETSys:
+    PAGESEL MCUInit
+    GOTO MCUInit
+
+;********** M C U   B E Ã L L Ã T Ã S O K **************************************
+    ORG 0x0006
+    
+;****************************************************************
+; 7-Szegmenses táblázat - bárhol elhelyezhető a memóriában
+;	lapváltásokra figyel
+;	maximális méret: 255 byte    
+;****************************************************************
+
+Get_7Seg:
+    
+    andlw b'00001111'		;Maximum 15
+    
+    addlw   LOW(TAB7Seg)
+    movwf   TargetLow
+
+    movlw   HIGH(TAB7Seg)
+    btfsc   STATUS,C
+    addlw   1
+    
+    movwf   PCLATH
+    movf    TargetLow,W
+    movwf   PCL
+
+TAB7Seg:
+    RETLW b'00111111'          ; 0
+    RETLW b'00000110'          ; 1
+    RETLW b'01011011'          ; 2
+    RETLW b'01001111'          ; 3
+    RETLW b'01100110'          ; 4
+    RETLW b'01101101'          ; 5
+    RETLW b'01111101'          ; 6
+    RETLW b'00000111'          ; 7
+    RETLW b'01111111'          ; 8
+    RETLW b'01101111'          ; 9
+    RETLW b'00000000'          ;   (semmi)
+    RETLW b'01000000'          ; - (kÃ¶tÅjel)
+    RETLW b'01000000'          ; - (kÃ¶tÅjel)
+    RETLW b'01000000'          ; - (kÃ¶tÅjel)
+    RETLW b'01000000'          ; - (kÃ¶tÅjel)
+    RETLW b'01000000'          ; - (kÃ¶tÅjel)
+
+    ; possible other patterns
+    
+MCUInit:
+    BANKSEL OSCCON
+    MOVLW b'01100001'
+    MOVWF OSCCON
+    
+    call    Init_Timer0Routin
+
+    BANKSEL ANSEL
+    CLRF ANSEL
+    CLRF ANSELH
+
+    BANKSEL TRISA
+    CLRF TRISA
+    BANKSEL PORTA
+    CLRF PORTA
+
+    BANKSEL TRISB
+    CLRF TRISB
+    BANKSEL PORTB
+    CLRF PORTB
+
+    BANKSEL TRISC
+    CLRF TRISC
+    BANKSEL PORTC
+    CLRF PORTC
+
+    BANKSEL TRISD
+    CLRF TRISD
+    BANKSEL PORTD
+    CLRF PORTD
+    
+    BANKSEL TRISE
+    CLRF TRISE
+    BANKSEL PORTE
+    CLRF PORTE
+
+    BANKSEL Ones
+    CLRF Ones
+    CLRF Tens
+    CLRF Hundreds
+    CLRF Thousands
+    CLRF PORTBx
+
+    CLRF SM_LED
+    CLRF STTATUSvalue
+    CLRF CurrentState
+    CLRF DigitState
+    
+    ; ==========================================================================
+    ; --- LCD 4-BITES INICIALIZÃLÃS ---
+    ; ==========================================================================
+    RS_CLR
+    E_CLR
+
+    CALL TIMER0_5ms
+    CALL TIMER0_5ms
+    CALL TIMER0_5ms
+    CALL TIMER0_5ms
+
+    PORTBwrite b'00000011'
+    
+    E_SET
+    E_CLR
+    CALL TIMER0_5ms
+
+    E_SET
+    E_CLR
+    CALL TIMER0_5ms
+
+    E_SET
+    E_CLR
+    CALL TIMER0_5ms
+
+    PORTBwrite b'00000010'
+    
+    E_SET
+    E_CLR
+    CALL TIMER0_5ms
+
+    MOVLW 0x28
+    CALL LCD_Cmd
+    MOVLW 0x0C
+    CALL LCD_Cmd
+    MOVLW 0x06
+    CALL LCD_Cmd
+    MOVLW 0x01
+    CALL LCD_Cmd
+    CALL TIMER0_5ms
+
+    ; ==========================================================================
+    ; --- ÃDVÃZL?KÃPERNY? ---
+    ; ==========================================================================
+    MOVLW 0x84
+    CALL LCD_Cmd
+
+    MOVLW 'E'
+    CALL LCD_Data
+    MOVLW 'a'
+    CALL LCD_Data
+    MOVLW 's'
+    CALL LCD_Data
+    MOVLW 'y'
+    CALL LCD_Data
+    MOVLW 'P'
+    CALL LCD_Data
+    MOVLW 'I'
+    CALL LCD_Data
+    MOVLW 'C'
+    CALL LCD_Data
+    MOVLW '5'
+    CALL LCD_Data
+    
+    CALL DelayTime2s
+
+    MOVLW 0x01
+    CALL LCD_Cmd
+    CALL TIMER0_5ms
+    
+    bsf	 STATEMACHINE
+    bsf  LCD_ON
+    bsf	 COUNTING
+    
+    MOVLW b'00001001'
+    MOVWF Ones
+    MOVWF Tens
+    MOVWF Hundreds
+    MOVWF Thousands
+
+;********** F ? P R O G R A M   H U R O K **************************************
+    
+LOOP:    
+    
+    MOVLW d'20'
+    MOVWF RepeatCount
+    
+    FLIP_STATUS 0
+    
+LOOP_NEXT: 
+    
+    ; TIMER0 kiértékelése    
+    
+    call    Timer0_Overflows
+    
+    movwf   CurrentTMR0
+    movf    LastTMR0,w	    ; 
+    subwf   CurrentTMR0,w   ; w = Current - Last
+    sublw   0x07	    ; w = 7 - w 
+    BTFSC   STATUS,C	    ; c = 0 : W > 7 ; c = 1 : W <= 7       
+    GOTO    LOOP_NEXT	    ; c = 1    
+			    ; c = 0			    
+    movf    CurrentTMR0,w
+    movwf   LastTMR0    
+    
+; Nagyjából 2.048ms időszeletek    
+    
+; --- PORTC MINDIG FRISSÃL, fÃ¼ggetlenÃ¼l az LCD flag-t?l ---
+    BANKSEL TempBin
+    CLRF TempBin
+    MOVF Hundreds, W
+    MOVWF TempBin           ; Hundreds * 1
+    ADDWF TempBin, F        ; * 2
+    ADDWF TempBin, F        ; * 3
+    ADDWF TempBin, F        ; * 4
+    ADDWF TempBin, F        ; * 5
+    ADDWF TempBin, F        ; * 6
+    ADDWF TempBin, F        ; * 7
+    ADDWF TempBin, F        ; * 8
+    ADDWF TempBin, F        ; * 9
+    ADDWF TempBin, F        ; * 10
+    MOVF  Tens, W
+    ADDWF TempBin, W        ; + Tens
+    MOVWF PORTC     
+    
+; ==========================================================================
+; --- 7-SZEGMENSES MULTIPLEXELÃS (TELJES, MEGSZAKÃTÃS NÃLKÃLI CIKLUS) ---
+; ==========================================================================    
+    
+    incf    DigitState,f	; Egy-egy digit azonos ideig világít
+    movlw   0x03
+    andwf   DigitState,f	; DigitState : 0 - 3
+    
+    movf    DigitState,W	; DigitState - A 7-szegmenses kijelző kiválasztása
+    movwf   CurrentState
+    btfsc   STATUS,Z
+    call    DIGIT_No4
+    
+    decf    CurrentState,f
+    btfsc   STATUS,Z
+    call    DIGIT_No3
+    
+    decf    CurrentState,f
+    btfsc   STATUS,Z
+    call    DIGIT_No2
+    
+    decf    CurrentState,f
+    btfsc   STATUS,Z
+    call    DIGIT_No1 
+
+; LCD kijelzés frissítése pozíciónként
+    
+    decf    RepeatCount,w		; LCD kijelzési lépések az ismétlési szám alapján
+    movwf   CurrentState      ; 1
+    btfsc   STATUS,Z
+    call    SM_1
+    
+    decf    CurrentState,f    ; 2
+    btfsc   STATUS,Z
+    call    SM_2
+    
+    decf    CurrentState,f    ; 3
+    btfsc   STATUS,Z
+    call    SM_3
+    
+    decf    CurrentState,f    ; 4
+    btfsc   STATUS,Z
+    call    SM_4
+    
+    decf    CurrentState,f    ; 5
+    btfsc   STATUS,Z
+    call    SM_5
+    
+    decf    CurrentState,f    ; 6
+    btfsc   STATUS,Z
+    call    SM_6
+    
+    decf    CurrentState,f    ; 7
+    btfsc   STATUS,Z
+    call    SM_7
+    
+    decf    CurrentState,f    ; 8
+    btfsc   STATUS,Z
+    call    SM_8
+    
+    decf    CurrentState,f    ; 9
+    btfsc   STATUS,Z
+    call    SM_9
+    
+    decf    CurrentState,f    ; 10
+    btfsc   STATUS,Z
+    call    SM_10
+    
+    decf    CurrentState,f    ; 11
+    btfsc   STATUS,Z
+    call    SM_11
+    
+    decf    CurrentState,f    ; 12
+    btfsc   STATUS,Z
+    call    SM_12
+    
+    decf    CurrentState,f    ; 13
+    btfsc   STATUS,Z
+    call    SM_13
+    
+    decf    CurrentState,f    ; 14
+    btfsc   STATUS,Z
+    call    SM_14
+   
+    DECFSZ    RepeatCount, F
+    GOTO      LOOP_NEXT		; Ha még nem nulla, akkor sima kör
+    
+    GOTO LOOP  ; RepeatCount újratöltése a kezdőértékre
+
+; LOOP vége
+    
+; Állapotok kezelése 
+    
+SM_14:    
+SM_13: 
+SM_12: 
+SM_11: 
+SM_10: 
+SM_9: 
+SM_8: 
+SM_7:
+    
+    RETURN  
+    
+; ==========================================================================
+; --- LCD FRISSÃTÃS: CSAK TELJES CIKLUS UTÃN ---
+; ==========================================================================
+    
+SM_6:    
+    
+    btfss LCD_ON
+    RETURN
+    
+    MOVLW 0x80
+    CALL LCD_Cmd
+    
+    RETURN
+    
+SM_5:    
+    
+    btfss LCD_ON
+    RETURN
+
+    MOVF Thousands, W
+    ADDLW 0x30
+    CALL LCD_Data
+    
+    RETURN
+
+SM_4:   
+    ;RETURN
+    btfss LCD_ON
+    RETURN
+
+    MOVF Hundreds, W
+    ADDLW 0x30
+    CALL LCD_Data
+    
+    RETURN
+    
+SM_3:
+     ;RETURN
+    btfss LCD_ON
+    RETURN
+
+    MOVF Tens, W
+    ADDLW 0x30
+    CALL LCD_Data
+    
+    RETURN
+    
+SM_2:    
+    ;RETURN
+    btfss LCD_ON
+    RETURN
+
+    MOVF Ones, W
+    ADDLW 0x30
+    CALL LCD_Data
+        
+    RETURN
+    
+; Counting - One times in every big loop
+SM_1:    
+    
+    btfss   COUNTING
+    goto END_of_Counting
+    ; ==========================================================================
+    ; --- SZÃMLÃLÃ NÃVELÃSE ---
+    ; ==========================================================================
+        
+    INCF Ones, F
+    MOVLW b'00001010'
+    SUBWF Ones, W
+    BTFSS STATUS, Z
+    goto END_of_Counting
+    CLRF Ones
+
+    INCF Tens, F
+    MOVLW b'00001010'
+    SUBWF Tens, W
+    BTFSS STATUS, Z
+    goto END_of_Counting
+    CLRF Tens
+
+    INCF Hundreds, F
+    MOVLW b'00001010'
+    SUBWF Hundreds, W
+    BTFSS STATUS, Z
+    goto END_of_Counting
+    CLRF Hundreds
+
+    INCF Thousands, F
+    MOVLW b'00001010'
+    SUBWF Thousands, W
+    BTFSS STATUS, Z
+    goto END_of_Counting
+    CLRF Thousands
+    goto END_of_Counting
+    
+END_of_Counting:
+    
+    RETURN
+    
+; Hétszegmenses rutinok   
+    
+DIGIT_No1:
+    ; --- 1. DIGIT (Egyesek) ---
+    MOVF Ones, W
+    CALL Get_7Seg
+;    CLRF    PCLATH
+    IORLW b'10000000'
+    MOVWF PORTD
+    movlw   b'00000001'
+    MOVWF PORTA
+    
+    RETURN    
+    
+DIGIT_No2:    
+        ; --- 2. DIGIT (TÃ­zesek) ---
+    MOVF Tens, W
+    CALL Get_7Seg
+;    CLRF    PCLATH
+    MOVWF PORTD
+    movlw   b'00000010'
+    MOVWF PORTA
+    
+    RETURN   
+
+DIGIT_No3:    
+        ; --- 3. DIGIT (SzÃ¡zasok) ---
+    MOVF Hundreds, W
+    CALL Get_7Seg
+;    CLRF    PCLATH
+    MOVWF PORTD
+    movlw   b'00000100'
+    MOVWF PORTA
+    
+    RETURN
+    
+DIGIT_No4:   
+        ; --- 4. DIGIT (Ezresek) ---    
+    MOVF Thousands, W
+    CALL Get_7Seg
+;    CLRF    PCLATH
+    MOVWF PORTD
+    movlw   b'00001000'
+    MOVWF PORTA
+    
+    RETURN   
+
+;********** L C D   K E Z E L ?   R U T I N O K ********************************
+LCD_Cmd:
+    MOVWF LCD_Temp
+    RS_CLR
+    GOTO LCD_Send
+
+LCD_Data:
+    MOVWF LCD_Temp
+    RS_SET
+
+LCD_Send:
+    MOVLW 0xF0
+    ANDWF PORTBx, F
+    SWAPF LCD_Temp, W
+    ANDLW 0x0F
+    IORWF PORTBx, F
+    PORTBupdate
+    E_SET
+    E_CLR
+
+    MOVLW 0xF0
+    ANDWF PORTBx, F
+    MOVLW 0x0F
+    ANDWF LCD_Temp, W
+    IORWF PORTBx, F
+    PORTBupdate
+    E_SET
+    E_CLR
+    
+    MOVLW 0xF0		
+    ANDWF PORTBx, f     
+    PORTBupdate		
+
+    ; Ha STATEMACHINE bit = 0 â teljes LCD Ã­rÃ¡s + 50Âµs vÃ¡rakozÃ¡s
+    ; Ha STATEMACHINE bit = 1 â LCD Ã­rÃ¡s gyorsabban, vÃ¡rakozÃ¡s nÃ©lkÃ¼l
+    btfss   STATEMACHINE
+    CALL Delay50us
+    RETURN
+    
+; =============================================
+; Inicializálás 
+; =============================================
+Init_Timer0Routin:
+    BANKSEL OPTION_REG
+    MOVLW   b'10001000'     ; !RBPU!=1, INTEDG=0 Interrupt on falling edge of INT pin ,
+			    ;  T0CS=0 = Internal instruction cycle clock (FOSC/4)  , 
+			    ;  T0SE=0 = Increment on low-to-high transition on T0CKI pin , 
+			    ;  PSA=0 = Prescaler is assigned to the TIMER0 module - not for WDT, 
+			    ;  PS=000 -> 1:2 - if PSA=1 it is for WDT (1:1) and it has no effect on TIMER0
+    MOVWF   OPTION_REG      ; 1:2 előosztó (opcionális, lásd megjegyzés)
+
+    BANKSEL TMR0
+    CLRF    TMR0            ; Timer0 törlése
+
+    BANKSEL INTCON
+    BCF     INTCON,TMR0IF          ; flag törlése
+    RETURN  
+    
+; =============================================
+; TIMER0 routines
+; =============================================
+TIMER0_5ms:
+    MOVLW   .10              ; 20-szor kell túlcsordulni
+    MOVWF   OverflowCnt
+
+TIMER0_5ms_Loop:
+    BTFSS   INTCON, TMR0IF  ; Várjuk, amíg TMR0IF = 1 lesz
+    GOTO    TIMER0_5ms_Loop
+
+    BCF     INTCON, TMR0IF  ; Flag törlése
+    DECFSZ  OverflowCnt, F  ; Csökkentjük a számlálót
+    GOTO    TIMER0_5ms_Loop       ; Ha még nem 0, folytatjuk
+
+    RETURN                     
+    
+; =============================================
+; Eljárás a TIMER0 túlcsordulások számlálására
+;
+;    Az eljárás végén:
+;    
+;    - w = TMR0IF_Cnt 
+;    - z=0 : TMR0IF_Cnt < 256 approx. TMR0IF_Cnt x 2,048ms
+;    - z=1 : TMR0IF_Cnt = 256 approx. 512ms
+; =============================================    
+    
+Timer0_Overflows:    
+    
+    BANKSEL TMR0IF_Cnt
+    movf    TMR0IF_Cnt,w
+    BTFSS   INTCON, TMR0IF  ; Várjuk, amíg TMR0IF = 1 lesz
+    RETURN  
+    BCF     INTCON, TMR0IF  ; Flag törlése
+    ADDLW   .1              ; hozzáadunk 1-et és 
+    movwf   TMR0IF_Cnt      ; tároljuk    
+    
+    RETURN
+    
+;********** I D ? Z Ã T Ã S E K **********************************************
+DelayTime2s:
+    MOVLW d'4'
+    MOVWF Delay2sVal
+DelayTime2s_Loop1:
+    MOVLW d'100'
+    MOVWF TempBin
+DelayTime2s_Loop2:
+    CALL TIMER0_5ms
+    DECFSZ TempBin, F
+    GOTO DelayTime2s_Loop2
+    DECFSZ Delay2sVal, F
+    GOTO DelayTime2s_Loop1
+    RETURN
+    
+Delay50us:
+    MOVLW d'15'
+    MOVWF Delay50usVal
+Delay50us_Hurok:
+    DECFSZ Delay50usVal, F
+    GOTO Delay50us_Hurok
+    RETURN
+
+    END
+    
+;make -f nbproject/Makefile-default.mk SUBPROJECTS= .build-conf
+;make[1]: Entering directory 'C:/MPLABXProjects/display_asm.X'
+;make  -f nbproject/Makefile-default.mk dist/default/production/display_asm.X.production.hex
+;make[2]: Entering directory 'C:/MPLABXProjects/display_asm.X'
+;"C:\Program Files\Microchip\MPLABX\v3.26\mpasmx\mpasmx.exe" -q -p16f887 -l"build/default/production/_ext/1629596589/newAsmTemplate8.lst" -e"build/default/production/_ext/1629596589/newAsmTemplate8.err" -o"build/default/production/_ext/1629596589/newAsmTemplate8.o" "C:/MPLABXProjects/display_asm.X/newAsmTemplate8.asm" 
+;Message[302] C:\MPLABXPROJECTS\DISPLAY_ASM.X\NEWASMTEMPLATE8.ASM 209 : Register in operand not in bank 0.  Ensure that bank bits are correct.
+;Message[302] C:\MPLABXPROJECTS\DISPLAY_ASM.X\NEWASMTEMPLATE8.ASM 214 : Register in operand not in bank 0.  Ensure that bank bits are correct.
+;Message[302] C:\MPLABXPROJECTS\DISPLAY_ASM.X\NEWASMTEMPLATE8.ASM 215 : Register in operand not in bank 0.  Ensure that bank bits are correct.
+;Message[302] C:\MPLABXPROJECTS\DISPLAY_ASM.X\NEWASMTEMPLATE8.ASM 218 : Register in operand not in bank 0.  Ensure that bank bits are correct.
+;Message[302] C:\MPLABXPROJECTS\DISPLAY_ASM.X\NEWASMTEMPLATE8.ASM 223 : Register in operand not in bank 0.  Ensure that bank bits are correct.
+;Message[302] C:\MPLABXPROJECTS\DISPLAY_ASM.X\NEWASMTEMPLATE8.ASM 228 : Register in operand not in bank 0.  Ensure that bank bits are correct.
+;Message[302] C:\MPLABXPROJECTS\DISPLAY_ASM.X\NEWASMTEMPLATE8.ASM 233 : Register in operand not in bank 0.  Ensure that bank bits are correct.
+;Message[302] C:\MPLABXPROJECTS\DISPLAY_ASM.X\NEWASMTEMPLATE8.ASM 238 : Register in operand not in bank 0.  Ensure that bank bits are correct.
+;Message[302] C:\MPLABXPROJECTS\DISPLAY_ASM.X\NEWASMTEMPLATE8.ASM 679 : Register in operand not in bank 0.  Ensure that bank bits are correct.
+;"C:\Program Files\Microchip\MPLABX\v3.26\mpasmx\mplink.exe"    -p16f887  -w  -m"dist/default/production/display_asm.X.production.map"   -z__MPLAB_BUILD=1  -odist/default/production/display_asm.X.production.cof  build/default/production/_ext/1629596589/newAsmTemplate8.o     
+;MPLINK 5.08, LINKER
+;Device Database Version 1.29
+;Copyright (c) 1998-2011 Microchip Technology Inc.
+;Errors    : 0
+;
+;MP2HEX 5.08, COFF to HEX File Converter
+;Copyright (c) 1998-2011 Microchip Technology Inc.
+;Errors    : 0
+;
+;make[2]: Leaving directory 'C:/MPLABXProjects/display_asm.X'
+;make[1]: Leaving directory 'C:/MPLABXProjects/display_asm.X'
+;
+;BUILD SUCCESSFUL (total time: 671ms)
+;Loading code from C:/MPLABXProjects/display_asm.X/dist/default/production/display_asm.X.production.hex...
+;Loading completed
+;
