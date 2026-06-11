@@ -40,18 +40,17 @@
         RepeatCount        ; MultiplexÃ¡lÃ¡s ismÃ©tlÃ©si szÃ¡mlÃ¡lÃ³
         LCD_Temp        ; Ideiglenes regiszter az LCD adatkÃ¼ldÃ©shez
         TempBin         ; Ideiglenes regiszter a binÃ¡ris szÃ¡mÃ­tÃ¡shoz
-	SM_LED
-	STTATUSvalue
-	CurrentState
-	PORTBx		; Shadow value for PORTB 
-	OverflowCnt     ; számláló (8-tól 0-ig)
-	TMR0IF_Cnt
-	CurrentTMR0
-	LastTMR0
-	DigitState
-	TempIndex
-	TargetLow
-	
+		SM_LED
+		STTATUSvalue
+		CurrentState
+		PORTBx		; Shadow value for PORTB 
+		OverflowCnt     ; számláló (8-tól 0-ig)
+		TMR0IF_Cnt
+		CurrentTMR0
+		LastTMR0
+		DigitState
+		TempIndex
+		TargetLow	
     ENDC
 
 #define	STATEMACHINE	   SM_LED,7    
