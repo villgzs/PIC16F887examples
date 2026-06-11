@@ -32,7 +32,7 @@
 ;********** V Ã L T O Z Ã K **************************************************
     CBLOCK 0x20
         Delay50usVal         
-	Delay2sVal
+		Delay2sVal
         Ones          ; Egyesek
         Tens          ; TÃ­zesek
         Hundreds         ; SzÃ¡zasok
