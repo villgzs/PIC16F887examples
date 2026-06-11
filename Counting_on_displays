@@ -13,7 +13,7 @@
 ;*******************************************************************************   
 ;    TIMER0 is in free running mode, so it counts the program steps.
 ;    Overflow on TIMER0 sets the corresponding FLAG
-;    Full loop should be shorter than half of TIMER0 overflowing time (approx. 256us / 2)    
+;    Full loop should be shorter than half of TIMER0 overflowing time (approx. 512us / 2)    
 ;
 ;    There is no interruption in the code
 ;    
